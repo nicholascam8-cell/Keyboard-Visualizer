@@ -95,5 +95,3 @@ cd "$HOME/Documents/OpenRGBProject" && npm install @kawarp/core@1.4.0
 ```
 
 Select a macOS Multi-Output Device containing **BlackHole 2ch** and your speakers or headphones. If the printed bass/mid/high levels stay at zero while music plays, check this routing. For a manual launch with the OpenRGB SDK server already running, use `rgb` by itself.
-
-**Optional Spicetify commands.** If your Shortcut runs `spicetify update`, it reloads theme changes before the visualizer starts. To upgrade Spicetify itself, use `spicetify upgrade` for a script-based installation or `brew upgrade spicetify-cli` for a Homebrew installation.
