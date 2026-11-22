@@ -200,43 +200,9 @@ class Pattern:
         self.phase = self.clock = self.energy = self.drive = 0.
         self.previous = np.zeros(3)
         self.hits = deque()
-        self.cooldown = self.spawn_time = self.sample_time = 0.
-        self.history = deque(maxlen=64)  # 16 seconds at four observations per second
+        self.cooldown = self.spawn_time = 0.
         self.effects = []
-        self.section = "verse"
-        self.section_start = self.baseline = 0.
-        self.direction = 0
-        self.vibe = 0.
         self.driving = False
-        self.sweep_start = None
-        self.release_start = None
-        self.release_direction = 0
-
-    def classify(self):
-        if len(self.history) < 24:
-            return
-        h = np.asarray(self.history)
-        old, recent, current = h[:-12].mean(), h[-12:-4].mean(), h[-4:].mean()
-        elapsed = self.clock - self.section_start
-        if self.section == "chorus":
-            if elapsed > 3 and (current < self.baseline + .06 or elapsed > 32):
-                self.section = "verse"
-            return
-        if self.section == "build":
-            if elapsed >= 6.5 and current > self.baseline + .16 and current > .52 and current >= recent-.025:
-                self.section = "chorus"
-                self.section_start = self.clock
-            elif current < recent-.05 or elapsed > 14:
-                self.section = "verse"
-        elif current > recent+.025 and recent > old+.025:
-            self.section = "build"
-            self.baseline = old
-            self.direction = int(self.rng.integers(4))
-            self.section_start = self.clock
-        elif current > old+.20 and current > .62 and recent > old+.12:
-            self.baseline = old
-            self.section = "chorus"
-            self.section_start = self.clock
 
     def advance(self, levels, dt, rms):
         self.clock += dt
@@ -249,43 +215,27 @@ class Pattern:
         if hit:
             self.hits.append(self.clock)
             self.cooldown = self.clock + .14
-        while self.hits and self.hits[0] < self.clock-4:
+        while self.hits and self.hits[0] < self.clock - 1.2:
             self.hits.popleft()
-        rhythm = min(1., len(self.hits)/10) * loud
-        self.drive += (rhythm-self.drive) * (-np.expm1(-dt/1.4))
-        # Dense, sustained attacks with bass and treble unlock sharp accents.
-        evidence = min(1., len(self.hits)/12) * loud * (.45 + .55*min(levels[0], levels[2]))
-        self.vibe += (evidence-self.vibe) * (-np.expm1(-dt/5))
-        self.driving = self.vibe > (.45 if self.driving else .60)
-        self.sample_time += dt
-        if self.sample_time >= .25:
-            self.sample_time %= .25
-            self.history.append(self.energy)
-            before = self.section
-            self.classify()
-            if self.section == "build" and before != "build":
-                self.sweep_start = self.clock
-                self.release_start = None
-            elif before == "build" and self.section != "build" and self.release_start is None:
-                self.release_start = self.clock
-                self.release_direction = int(self.rng.integers(4))
-        if self.sweep_start is not None:
-            if self.release_start is None and self.clock-self.sweep_start >= 6.3:
-                self.release_start = self.clock
-                self.release_direction = int(self.rng.integers(4))
-            if self.release_start is not None and self.clock-self.release_start >= .8:
-                self.sweep_start = None
+        # Either repeated transients or sustained, loud broadband sound can
+        # accelerate motion. A brief peak alone should only lift brightness.
+        density = min(1., max(0, len(self.hits) - 1) / 2)
+        broadband = float(np.mean(levels))
+        sustained = float(np.clip((loud * broadband - .52) / .32, 0, 1))
+        evidence = max(density * loud, sustained)
+        response = .28 if evidence > self.drive else .70
+        self.drive += (evidence - self.drive) * (-np.expm1(-dt / response))
+        was_driving = self.driving
+        self.driving = self.drive > (.40 if was_driving else .64)
+        accent = self.driving and not was_driving
         self.phase = (self.phase + dt*(.05+.7*levels.mean()+.5*levels[0])) % 100
         self.effects = [e for e in self.effects if e.progress < 1]
-        chorus = self.section == "chorus"
-        power = min(1., self.energy*(.7+.55*self.drive)+.16*chorus)
-        if not self.driving:
-            power *= .48
+        power = min(1., self.energy * (.46 + .86*self.drive))
         for e in self.effects:
             e.progress += dt*(.18+.83*power+.4*self.drive)*e.speed
         capacity = min(5, 2 + int(4*power))
-        if (hit or self.clock >= self.spawn_time) and loud > .04 and len(self.effects) < capacity:
-            bold = self.driving and self.rng.random() < power*(.25+.75*self.drive)
+        if (accent or hit or self.clock >= self.spawn_time) and loud > .04 and len(self.effects) < capacity:
+            bold = accent or (self.driving and self.rng.random() < power*(.25+.75*self.drive))
             kind = self.rng.choice(("line","burst") if bold else ("wave","ripple"))
             boost = self.rng.uniform(1.22,1.55) if self.driving else 1.08
             boost = boost if self.rng.random()<.5 else 1.
@@ -313,20 +263,7 @@ class Pattern:
             fade = smooth((p-.12*order)/.18) * smooth((1-p-.18*order)/.20)
             remaining *= 1-np.minimum(.98, shape*fade*e.strength)
         gate = min(1., levels.max()*5)
-        light = (1-remaining)*min(1., self.energy*(1.1+.45*self.drive)+.10*(self.section=="chorus"))
-        if self.sweep_start is not None:
-            axes = (x, 1-x, y, 1-y)
-            end = self.clock if self.release_start is None else self.release_start
-            front = (end-self.sweep_start)/6 * 1.08
-            fill = smooth((front-axes[self.direction])/.08)
-            reveal = smooth((end-self.sweep_start)/.4)
-            # Dim the background ahead of the advancing edge for readable contrast.
-            if self.release_start is None:
-                cover = reveal
-            else:
-                progress = (self.clock-self.release_start)/.8
-                cover = reveal*(1-smooth((progress-.55*axes[self.release_direction])/.45))
-            light = light*(1-.74*cover) + (.28+.40*self.energy)*fill*cover
+        light = (1-remaining)*min(1., self.energy*(1.1+.45*self.drive))
         return light*gate
 
     def render(self, mode, colours, x, y, bands, levels, palette):
