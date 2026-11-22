@@ -1,6 +1,7 @@
 """Spotify artwork → Kawarp colours; BlackHole audio → three keyboard level meters.
 Place next to node_modules/@kawarp/core and run through start-keyboard-music.command.
 """
+from dataclasses import dataclass
 import argparse
 import io
 import os
@@ -85,7 +86,7 @@ def kawarp_palette(node, rgba):
 def watch_art(node, updates, stop):
     import requests
     from PIL import Image
-    last_url = last_error = None
+    last_url = last_error = last_song = None
     while not stop.is_set():
         try:
             result = subprocess.run(["/usr/bin/osascript", "-e", SPOTIFY], capture_output=True,
@@ -97,9 +98,12 @@ def watch_art(node, updates, stop):
                 with Image.open(io.BytesIO(res.content)) as image:
                     rgba = image.convert("RGB").resize((64, 64), Image.Resampling.BOX).convert("RGBA")
                     colors = kawarp_palette(node, rgba.tobytes())
-                updates.append(colors)
+                cached = colors
                 last_url = url
                 print(f"Kawarp • {song} • " + " ".join("#%02x%02x%02x" % tuple(c.astype(int)) for c in colors))
+            if sep and url == last_url and (song, url) != last_song:
+                updates.append(cached)
+                last_song = (song, url)
             last_error = None
         except Exception as exc:
             message = str(getattr(exc, "stderr", "") or exc).strip()
@@ -172,30 +176,158 @@ def visible(swatches, pixels):
     peak = pool.max(axis=1)
     candidates = pool[peak >= max(10, peak.max() * .4)]
     for i, color in enumerate(swatches):
-        if max(color) < 10:
+        if max(color) < 5 or (max(color) < 24 and peak.max() > 3*max(color)):
             if len(candidates):
                 color = candidates[i * (len(candidates) - 1) // 2]
             else:
                 color = FALLBACK[i]
-        swatches[i] = color * max(1, 160 / max(color))
+        swatches[i] = color * max(1, 235 / max(color))
     return swatches
+
+@dataclass
+class Effect:
+    kind: str
+    origin: np.ndarray
+    angle: float
+    speed: float
+    strength: float
+    progress: float = 0.
+
 
 class Pattern:
     def __init__(self):
-        self.phase = self.age = self.last_peak = 0.
-        self.style = 0
-        self.origin = (.5, .5)
         self.rng = np.random.default_rng()
+        self.phase = self.clock = self.energy = self.drive = 0.
+        self.previous = np.zeros(3)
+        self.hits = deque()
+        self.cooldown = self.spawn_time = self.sample_time = 0.
+        self.history = deque(maxlen=64)  # 16 seconds at four observations per second
+        self.effects = []
+        self.section = "verse"
+        self.section_start = self.baseline = 0.
+        self.direction = 0
+        self.vibe = 0.
+        self.driving = False
+        self.sweep_start = None
+        self.release_start = None
+        self.release_direction = 0
 
-    def advance(self, levels, dt):
-        peak = levels.max()
-        self.phase = (self.phase + dt * (.05 + .7 * levels.mean() + .5 * levels[0])) % 100
-        self.age += dt
-        if peak > .08 and (self.age > 2 or (self.age > .35 and peak - self.last_peak > .08)):
-            self.style = (self.style + int(self.rng.integers(1, 4))) % 4
-            self.origin = self.rng.random(2)
-            self.age = 0
-        self.last_peak = peak
+    def classify(self):
+        if len(self.history) < 24:
+            return
+        h = np.asarray(self.history)
+        old, recent, current = h[:-12].mean(), h[-12:-4].mean(), h[-4:].mean()
+        elapsed = self.clock - self.section_start
+        if self.section == "chorus":
+            if elapsed > 3 and (current < self.baseline + .06 or elapsed > 32):
+                self.section = "verse"
+            return
+        if self.section == "build":
+            if elapsed >= 6.5 and current > self.baseline + .16 and current > .52 and current >= recent-.025:
+                self.section = "chorus"
+                self.section_start = self.clock
+            elif current < recent-.05 or elapsed > 14:
+                self.section = "verse"
+        elif current > recent+.025 and recent > old+.025:
+            self.section = "build"
+            self.baseline = old
+            self.direction = int(self.rng.integers(4))
+            self.section_start = self.clock
+        elif current > old+.20 and current > .62 and recent > old+.12:
+            self.baseline = old
+            self.section = "chorus"
+            self.section_start = self.clock
+
+    def advance(self, levels, dt, rms):
+        self.clock += dt
+        loud = float(np.clip((20*np.log10(max(rms, 1e-6))+57)/48, 0, 1))
+        target = loud * (.45 + .55*levels.max())
+        self.energy += (target-self.energy) * (-np.expm1(-dt/.14))
+        flux = float(np.maximum(levels-self.previous, 0) @ [.5, .15, .35])
+        self.previous = levels.copy()
+        hit = flux > .055 and self.clock >= self.cooldown and loud > .10
+        if hit:
+            self.hits.append(self.clock)
+            self.cooldown = self.clock + .14
+        while self.hits and self.hits[0] < self.clock-4:
+            self.hits.popleft()
+        rhythm = min(1., len(self.hits)/10) * loud
+        self.drive += (rhythm-self.drive) * (-np.expm1(-dt/1.4))
+        # Dense, sustained attacks with bass and treble unlock sharp accents.
+        evidence = min(1., len(self.hits)/12) * loud * (.45 + .55*min(levels[0], levels[2]))
+        self.vibe += (evidence-self.vibe) * (-np.expm1(-dt/5))
+        self.driving = self.vibe > (.45 if self.driving else .60)
+        self.sample_time += dt
+        if self.sample_time >= .25:
+            self.sample_time %= .25
+            self.history.append(self.energy)
+            before = self.section
+            self.classify()
+            if self.section == "build" and before != "build":
+                self.sweep_start = self.clock
+                self.release_start = None
+            elif before == "build" and self.section != "build" and self.release_start is None:
+                self.release_start = self.clock
+                self.release_direction = int(self.rng.integers(4))
+        if self.sweep_start is not None:
+            if self.release_start is None and self.clock-self.sweep_start >= 6.3:
+                self.release_start = self.clock
+                self.release_direction = int(self.rng.integers(4))
+            if self.release_start is not None and self.clock-self.release_start >= .8:
+                self.sweep_start = None
+        self.phase = (self.phase + dt*(.05+.7*levels.mean()+.5*levels[0])) % 100
+        self.effects = [e for e in self.effects if e.progress < 1]
+        chorus = self.section == "chorus"
+        power = min(1., self.energy*(.7+.55*self.drive)+.16*chorus)
+        if not self.driving:
+            power *= .48
+        for e in self.effects:
+            e.progress += dt*(.18+.83*power+.4*self.drive)*e.speed
+        capacity = min(5, 2 + int(4*power))
+        if (hit or self.clock >= self.spawn_time) and loud > .04 and len(self.effects) < capacity:
+            bold = self.driving and self.rng.random() < power*(.25+.75*self.drive)
+            kind = self.rng.choice(("line","burst") if bold else ("wave","ripple"))
+            boost = self.rng.uniform(1.22,1.55) if self.driving else 1.08
+            boost = boost if self.rng.random()<.5 else 1.
+            self.effects.append(Effect(kind, self.rng.random(2), self.rng.uniform(-np.pi,np.pi),
+                                       self.rng.uniform(.65,1.1), boost*(.28+.7*power)))
+            self.spawn_time = self.clock + 1.55-1.35*power
+
+    def random_light(self, x, y, levels):
+        # Screen blend accumulates contributions without replacing earlier effects.
+        remaining = np.ones_like(x)
+        for e in self.effects:
+            dx, dy = x-e.origin[0], (y-e.origin[1])*.55
+            along = dx*np.cos(e.angle)+dy*np.sin(e.angle)
+            radius = np.hypot(dx, dy)
+            p = min(e.progress, 1.)
+            if e.kind == "wave":
+                shape = (.5+.5*np.cos(6*along+1.3*np.sin(4*y)-6*p))**1.5
+            elif e.kind == "ripple":
+                shape = (.5+.5*np.cos(14*radius-8*p))**2
+            elif e.kind == "line":
+                shape = np.exp(-30*np.abs(along-(p-.5)*1.5))
+            else:
+                shape = np.exp(-12*np.abs(radius-p))*(1-.55*p)
+            order = np.clip(.5 + along*.55, 0, 1)
+            fade = smooth((p-.12*order)/.18) * smooth((1-p-.18*order)/.20)
+            remaining *= 1-np.minimum(.98, shape*fade*e.strength)
+        gate = min(1., levels.max()*5)
+        light = (1-remaining)*min(1., self.energy*(1.1+.45*self.drive)+.10*(self.section=="chorus"))
+        if self.sweep_start is not None:
+            axes = (x, 1-x, y, 1-y)
+            end = self.clock if self.release_start is None else self.release_start
+            front = (end-self.sweep_start)/6 * 1.08
+            fill = smooth((front-axes[self.direction])/.08)
+            reveal = smooth((end-self.sweep_start)/.4)
+            # Dim the background ahead of the advancing edge for readable contrast.
+            if self.release_start is None:
+                cover = reveal
+            else:
+                progress = (self.clock-self.release_start)/.8
+                cover = reveal*(1-smooth((progress-.55*axes[self.release_direction])/.45))
+            light = light*(1-.74*cover) + (.28+.40*self.energy)*fill*cover
+        return light*gate
 
     def render(self, mode, colours, x, y, bands, levels, palette):
         strength = levels[bands]
@@ -208,18 +340,7 @@ class Pattern:
         elif mode == "whole":
             light = np.full_like(x, levels.max())
         elif mode == "random":
-            dx, dy = x-self.origin[0], y-self.origin[1]
-            radius = np.hypot(dx, dy*.55)
-            wave = self.phase * 2*np.pi
-            if self.style == 0:
-                light = (.5 + .5*np.cos(7*x + 2*np.sin(4*y) - wave))**2
-            elif self.style == 1:
-                light = (.5 + .5*np.cos(12*x+6*y-wave))**5
-            elif self.style == 2:
-                light = (.5 + .5*np.cos(16*radius-wave))**3
-            else:
-                light = np.exp(-5*np.abs(radius-self.age*.9)) * np.exp(-self.age*.7)
-            light *= .65*levels.max() + .35*strength
+            light = self.random_light(x, y, levels)
         else:
             distance = y if mode == "top-down" else 1-y
             light = np.clip(6*strength - 5*distance, 0, 1)
@@ -229,7 +350,70 @@ class Pattern:
             index = pos.astype(int) % 3
             fraction = (pos % 1)[:, None]
             colors = palette[index]*(1-fraction) + palette[(index+1)%3]*fraction
-        return colors * light[:, None]
+        # A single multiplier per key preserves channel ratios even at full output.
+        if mode == "random":
+            light = np.minimum(1.28 * light, 255 / np.maximum(colors.max(axis=1), 1))
+        return np.clip(colors * light[:, None], 0, 255)
+
+
+def smooth(value):
+    value = np.clip(value, 0, 1)
+    return value * value * (3 - 2 * value)
+
+
+class KeySequence:
+    """Blend from the last displayed frame, with a different start time per key."""
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+        self.rng = np.random.default_rng()
+        self.frame = np.zeros((len(x), 3))
+        self.playing = False
+        self.quiet_since = None
+        self.started = None
+
+    def begin(self, now, playing):
+        self.playing = playing
+        self.started = now
+        self.source = self.frame.copy()
+        style = self.rng.integers(3)
+        if style == 0:
+            angle = self.rng.uniform(0, 2*np.pi)
+            order = self.x*np.cos(angle) + self.y*.4*np.sin(angle)
+        elif style == 1:
+            cx, cy = self.rng.random(2)
+            order = np.hypot(self.x-cx, .4*(self.y-cy))
+            if self.rng.random() < .5:
+                order = -order
+        else:
+            order = self.rng.random(len(self.x))
+        self.order = (order-order.min()) / max(np.ptp(order), 1e-9)
+        self.duration = .85 if playing else 1.35
+
+    def blend(self, pixels, now):
+        target = pixels if self.playing else np.zeros_like(self.frame)
+        if self.started is None:
+            self.frame = target
+        else:
+            progress = (now-self.started)/self.duration
+            weight = smooth((progress-.65*self.order)/.35)[:, None]
+            self.frame = self.source*(1-weight) + target*weight
+            if progress >= 1:
+                self.started = None
+                self.frame = target
+        return self.frame
+
+    def update(self, pixels, rms, now):
+        if rms >= .0003:
+            self.quiet_since = None
+            if not self.playing:
+                self.begin(now, True)
+        elif self.playing:
+            if self.quiet_since is None:
+                self.quiet_since = now
+            if now-self.quiet_since < .14:
+                return self.frame
+            self.begin(now, False)
+        return self.blend(pixels, now)
 
 
 class Lights:
@@ -255,20 +439,18 @@ class Lights:
             self.ids, self.bands, self.rows = map(np.asarray, (self.ids, self.bands, self.rows))
             self.x = np.asarray(xs_all)
             self.y = 1 - self.rows / 5
+            self.sequence = KeySequence(self.x, self.y)
         print(f"{role}: {device.name} • {mode.name} • " + ("live audio" if self.live else "album colour only"))
 
-    def send(self, levels, palette, brightness, now):
+    def send(self, levels, palette, brightness, now, rms=0):
         from openrgb.utils import RGBColor
         if now < self.next_write:
             return
         self.next_write = now + self.interval
         if self.role == "Keyboard":
             pixels = self.pattern.render(self.mode, self.colours, self.x, self.y, self.bands, levels, palette)
-            frame = np.zeros((len(self.device.leds), 3), dtype=np.uint8)
-            frame[self.ids] = np.clip(pixels * brightness, 0, 255)
-            key = frame.tobytes()
-            if key != self.previous:
-                self.device.set_colors([RGBColor(*c) for c in frame.tolist()], fast=True)
+            self.write_keys(self.sequence.update(pixels * brightness, rms, now))
+            return
         else:
             if self.live:
                 band = int(np.argmax(levels))
@@ -279,6 +461,26 @@ class Lights:
             if key != self.previous:
                 self.device.set_color(RGBColor(*key), fast=self.live)
         self.previous = key
+
+    def write_keys(self, pixels):
+        from openrgb.utils import RGBColor
+        frame = np.zeros((len(self.device.leds), 3), dtype=np.uint8)
+        frame[self.ids] = np.clip(pixels, 0, 255)
+        key = frame.tobytes()
+        if key != self.previous:
+            self.device.set_colors([RGBColor(*c) for c in frame.tolist()], fast=True)
+            self.previous = key
+
+    def finish_keys(self):
+        seq = self.sequence
+        if seq.frame.any():
+            if seq.playing:
+                seq.begin(time.monotonic(), False)
+            while seq.started is not None:
+                self.write_keys(seq.blend(None, time.monotonic()))
+                if seq.started is not None:
+                    time.sleep(1/40)
+        self.write_keys(np.zeros_like(seq.frame))
 
 
 def connect(args):
@@ -388,6 +590,11 @@ def main():
                     next_settings = now + .35
                 if colors:
                     palette = colors.pop()
+                    for target in targets:
+                        if target.role == "Keyboard":
+                            target.pattern = Pattern()
+                            if target.sequence.playing:
+                                target.sequence.begin(now, True)
                 if buffer:
                     samples = np.frombuffer(buffer.pop(), np.int16).reshape(BLOCK, channels) / 32768.
                     levels, rms = meter.read(samples, min(now - last_audio, 0.25))
@@ -396,8 +603,9 @@ def main():
                     levels, rms = meter.read(silent, dt)
                 for target in targets:
                     try:
-                        target.pattern.advance(levels, dt)
-                        target.send(levels, palette, args.brightness, now)
+                        if target.role == "Keyboard":
+                            target.pattern.advance(levels, dt, rms)
+                        target.send(levels, palette, args.brightness, now, rms)
                     except Exception as exc:
                         print(f"{target.device.name}: write failed: {exc}")
                         target.next_write = now + 2
@@ -409,6 +617,9 @@ def main():
             for target in targets:
                 if target.live:
                     try:
+                        if target.role == "Keyboard":
+                            target.finish_keys()
+                            continue
                         target.next_write = 0
                         target.send(np.zeros(3), palette, 0, time.monotonic())
                     except Exception:
