@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import shutil
+import sys
 import signal
 import subprocess
 import threading
@@ -78,7 +79,7 @@ def kawarp_palette(node, rgba):
         candidates = rgb[strength >= np.percentile(strength, 25)]
         centre = np.median(candidates, axis=0)
         swatches.append(candidates[np.argmin(np.sum((candidates - centre) ** 2, axis=1))])
-    return np.array(swatches)
+    return visible(np.array(swatches), pixels)
 
 
 def watch_art(node, updates, stop):
@@ -134,6 +135,103 @@ class Levels:
         return self.envelope, rms
 
 
+SETTINGS = ROOT / ".visualizer-settings"
+MODES = ("bottom-up", "horizontal", "top-down", "central", "whole", "random")
+OPTIONS = {"mode": MODES, "colours": ("static", "dynamic")}
+
+def setting(key, default):
+    try:
+        value = (SETTINGS / key).read_text().strip()
+        if key == "fps":
+            return int(value) if 1 <= int(value) <= 480 else default
+        return value if value in OPTIONS[key] else default
+    except (OSError, ValueError):
+        return default
+
+def control():
+    parser = argparse.ArgumentParser(description="Change live visualizer settings")
+    parser.add_argument("key", choices=["mode", "colours", "fps", "status"])
+    parser.add_argument("value", nargs="?")
+    args = parser.parse_args()
+    if args.key == "status":
+        for key, default in [("mode", "bottom-up"), ("colours", "static"), ("fps", 40)]:
+            print(key, setting(key, default))
+        return
+    value = args.value or ""
+    valid = value.isascii() and value.isdecimal() and 1 <= int(value) <= 480 if args.key == "fps" else value in OPTIONS[args.key]
+    if not valid:
+        parser.error("Choose " + (", ".join(OPTIONS[args.key]) if args.key in OPTIONS else "1–480"))
+    SETTINGS.mkdir(exist_ok=True)
+    temp = SETTINGS / f".{args.key}-{os.getpid()}"
+    temp.write_text(value)
+    temp.replace(SETTINGS / args.key)
+    print(args.key, value)
+
+def visible(swatches, pixels):
+    pool = pixels.reshape(-1, 3).astype(float)
+    peak = pool.max(axis=1)
+    candidates = pool[peak >= max(10, peak.max() * .4)]
+    for i, color in enumerate(swatches):
+        if max(color) < 10:
+            if len(candidates):
+                color = candidates[i * (len(candidates) - 1) // 2]
+            else:
+                color = FALLBACK[i]
+        swatches[i] = color * max(1, 160 / max(color))
+    return swatches
+
+class Pattern:
+    def __init__(self):
+        self.phase = self.age = self.last_peak = 0.
+        self.style = 0
+        self.origin = (.5, .5)
+        self.rng = np.random.default_rng()
+
+    def advance(self, levels, dt):
+        peak = levels.max()
+        self.phase = (self.phase + dt * (.05 + .7 * levels.mean() + .5 * levels[0])) % 100
+        self.age += dt
+        if peak > .08 and (self.age > 2 or (self.age > .35 and peak - self.last_peak > .08)):
+            self.style = (self.style + int(self.rng.integers(1, 4))) % 4
+            self.origin = self.rng.random(2)
+            self.age = 0
+        self.last_peak = peak
+
+    def render(self, mode, colours, x, y, bands, levels, palette):
+        strength = levels[bands]
+        if mode == "horizontal":
+            strength = levels[np.minimum((y * 3).astype(int), 2)]
+            light = np.clip((strength - x) * 18 + strength, 0, 1)
+        elif mode == "central":
+            distance = np.hypot((x-.5)*2, (y-.5)*1.2) / 1.17
+            light = np.clip((strength-distance)*7 + strength, 0, 1)
+        elif mode == "whole":
+            light = np.full_like(x, levels.max())
+        elif mode == "random":
+            dx, dy = x-self.origin[0], y-self.origin[1]
+            radius = np.hypot(dx, dy*.55)
+            wave = self.phase * 2*np.pi
+            if self.style == 0:
+                light = (.5 + .5*np.cos(7*x + 2*np.sin(4*y) - wave))**2
+            elif self.style == 1:
+                light = (.5 + .5*np.cos(12*x+6*y-wave))**5
+            elif self.style == 2:
+                light = (.5 + .5*np.cos(16*radius-wave))**3
+            else:
+                light = np.exp(-5*np.abs(radius-self.age*.9)) * np.exp(-self.age*.7)
+            light *= .65*levels.max() + .35*strength
+        else:
+            distance = y if mode == "top-down" else 1-y
+            light = np.clip(6*strength - 5*distance, 0, 1)
+        colors = palette[bands]
+        if colours == "dynamic":
+            pos = ((x + y*.10 - self.phase) % 1)*3
+            index = pos.astype(int) % 3
+            fraction = (pos % 1)[:, None]
+            colors = palette[index]*(1-fraction) + palette[(index+1)%3]*fraction
+        return colors * light[:, None]
+
+
 class Lights:
     def __init__(self, device, role, mode, rate):
         self.device, self.role = device, role
@@ -143,15 +241,20 @@ class Lights:
         self.interval = 1 / rate
         self.next_write = 0
         self.previous = None
-        self.ids, self.bands, self.rows = [], [], []
+        self.ids, self.bands, self.rows, xs_all = [], [], [], []
+        self.pattern = Pattern()
+        self.mode, self.colours = "bottom-up", "static"
         if role == "Keyboard":
             for row, (ids, xs) in enumerate(zip(PHYSICAL_MAP, ROW_POSITIONS)):
                 for led, x in zip(ids, xs):
                     if led < len(device.leds):
+                        xs_all.append(x / 23)
                         self.ids.append(led)
                         self.bands.append(0 if x < 7 else 1 if x < 15 else 2)
                         self.rows.append(5 - row)
             self.ids, self.bands, self.rows = map(np.asarray, (self.ids, self.bands, self.rows))
+            self.x = np.asarray(xs_all)
+            self.y = 1 - self.rows / 5
         print(f"{role}: {device.name} • {mode.name} • " + ("live audio" if self.live else "album colour only"))
 
     def send(self, levels, palette, brightness, now):
@@ -160,10 +263,9 @@ class Lights:
             return
         self.next_write = now + self.interval
         if self.role == "Keyboard":
-            # Light from the bottom upwards. Fractional rows avoid a hard jump.
-            height = np.clip(6 * levels[self.bands] - self.rows, 0, 1)
+            pixels = self.pattern.render(self.mode, self.colours, self.x, self.y, self.bands, levels, palette)
             frame = np.zeros((len(self.device.leds), 3), dtype=np.uint8)
-            frame[self.ids] = palette[self.bands] * height[:, None] * brightness
+            frame[self.ids] = np.clip(pixels * brightness, 0, 255)
             key = frame.tobytes()
             if key != self.previous:
                 self.device.set_colors([RGBColor(*c) for c in frame.tolist()], fast=True)
@@ -219,8 +321,8 @@ def main():
     parser.add_argument("--mouse-name", default="G203")
     parser.add_argument("--mic-name", default="888-000534")
     args = parser.parse_args()
-    if not (0 <= args.brightness <= 1 and 0 < args.gain <= 10 and 1 <= args.fps <= 90):
-        parser.error("Use brightness 0–1, gain above 0 through 10 and fps 1–90.")
+    if not (0 <= args.brightness <= 1 and 0 < args.gain <= 10 and 1 <= args.fps <= 480):
+        parser.error("Use brightness 0–1, gain above 0 through 10 and fps 1–480.")
     with ExitStack() as cleanup:
         audio = pyaudio.PyAudio()
         cleanup.callback(audio.terminate)
@@ -266,7 +368,8 @@ def main():
         meter = Levels(rate, args.gain)
         palette = FALLBACK
         last_audio = previous = time.monotonic()
-        next_log = previous
+        next_log = next_settings = previous
+        fps = args.fps
         silent = np.zeros((BLOCK, channels))
         levels = np.zeros(3)
         rms = 0
@@ -275,6 +378,14 @@ def main():
                 now = time.monotonic()
                 dt = min(0.25, now - previous)
                 previous = now
+                if now >= next_settings:
+                    fps = setting("fps", args.fps)
+                    mode = setting("mode", "bottom-up")
+                    colours = setting("colours", "static")
+                    for target in targets:
+                        target.mode, target.colours = mode, colours
+                        target.interval = 1 / (fps if target.role == "Keyboard" else min(24, fps))
+                    next_settings = now + .35
                 if colors:
                     palette = colors.pop()
                 if buffer:
@@ -285,6 +396,7 @@ def main():
                     levels, rms = meter.read(silent, dt)
                 for target in targets:
                     try:
+                        target.pattern.advance(levels, dt)
                         target.send(levels, palette, args.brightness, now)
                     except Exception as exc:
                         print(f"{target.device.name}: write failed: {exc}")
@@ -292,7 +404,7 @@ def main():
                 if now >= next_log:
                     print(f"rms={rms:.4f}  bass/mid/high=" + "/".join(f"{v:.0%}" for v in levels))
                     next_log = now + 2
-                stop.wait(max(0, 1 / args.fps - (time.monotonic() - now)))
+                stop.wait(max(0, 1 / fps - (time.monotonic() - now)))
         finally:
             for target in targets:
                 if target.live:
@@ -305,7 +417,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:2] in (["mode"], ["colours"], ["fps"], ["status"]):
+            control()
+        else:
+            main()
     except KeyboardInterrupt:
         pass
     except Exception as error:
