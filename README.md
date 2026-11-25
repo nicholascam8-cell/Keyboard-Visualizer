@@ -1,6 +1,6 @@
 # Keyboard Visualizer
 
-A macOS music visualizer for the SteelSeries Apex 7. BlackHole captures the audio, Kawarp supplies colours from Spotify album artwork, and OpenRGB sends the lighting to the keyboard, G203 mouse, and microphone. The keyboard responds to bass, mids, and treble. Peripheral lighting depends on the modes each device exposes.
+A macOS music visualizer for keyboards that OpenRGB exposes with a Direct per-LED mode. BlackHole captures the audio, Kawarp supplies colours from Spotify album artwork, and OpenRGB sends the lighting to detected keyboards and optionally the configured mouse and microphone. The keyboard responds to bass, mids, and treble. Peripheral lighting depends on the modes each device exposes.
 
 ## Start and stop
 
@@ -81,6 +81,7 @@ bash "$HOME/Documents/OpenRGBProject/start-keyboard-music.command" --brightness 
 | `--audio-device` | Numeric input device index. Overrides the name. |
 | `--audio` | `mono` or `stereo`. Default stereo. |
 | `--list-audio-devices` | Lists input names and indices, then exits. Run `rgb --list-audio-devices` directly. |
+| `--keyboard-name` | Select matching keyboards by name substring. The default uses all Direct per-LED keyboards. | 
 | `--mouse-name` | Mouse name substring. Default `G203`. Pass `--mouse-name ""` to skip. |
 | `--mic-name` | Microphone lighting device substring. Default `888-000534`. Pass `--mic-name ""` to skip. |
 | `--palette auto` | Selects automatic Kawarp album colours. |
@@ -95,3 +96,9 @@ cd "$HOME/Documents/OpenRGBProject" && npm install @kawarp/core@1.4.0
 ```
 
 Select a macOS Multi-Output Device containing **BlackHole 2ch** and your speakers or headphones. If the printed bass/mid/high levels stay at zero while music plays, check this routing. For a manual launch with the OpenRGB SDK server already running, use `rgb` by itself.
+
+## Keyboard layout and licensing
+
+Matrix zones place each key at the position supplied by OpenRGB. Linear zones spread the effect along a line. LEDs with no known position pulse with the strongest audio band. A full-size Apex 7 can use its built-in profile when the controller provides no usable matrix. Use `--keyboard-name "Apex"` to limit output when multiple keyboards are connected.
+
+The combined visualizer is distributed under GPL version 2. See [LICENSE](LICENSE) and [third-party credits and source](THIRD_PARTY.md).
