@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 import spotify_rgb as rgb
+from visualizer_colours import colour_field
 from visualizer_artwork import FALLBACK, kawarp_palette
 from visualizer_audio import BLOCK, RATE, open_audio, select_input
 from visualizer_settings import PATTERNS, ROOT, Settings, command_line, output_fps
@@ -86,6 +87,58 @@ class SettingsTests(unittest.TestCase):
         mode, shape, peak = rendered[-1]
         self.assertEqual((mode, shape), ("spectrum", (HEIGHT, WIDTH, 3)))
         self.assertGreater(peak, 0)
+
+
+class ColourMotionTests(unittest.TestCase):
+    def test_both_dynamic_choices_persist_and_render_on_keys(self):
+        x = np.linspace(0, 1, 24)
+        y = np.linspace(0, 1, 24)
+        bands = np.minimum((x * 3).astype(int), 2)
+        pattern = rgb.Pattern()
+        pattern.phase = .4
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.txt"
+            for mode in ("dynamic", "dynamic+"):
+                command_line(["--settings", str(path), "colours", mode])
+                self.assertEqual(Settings(path).effective().colours, mode)
+                actual = pattern.render("whole", mode, x, y, bands, np.ones(3), FALLBACK)
+                expected = colour_field(mode, x, y, FALLBACK, pattern.phase)
+                np.testing.assert_allclose(actual, expected)
+
+    def test_fluid_motion_is_smooth_two_dimensional_and_seamless(self):
+        x, y = np.meshgrid(np.linspace(0, 1, 16), np.linspace(0, 1, 8))
+        frame = colour_field("dynamic+", x, y, FALLBACK, .6)
+        self.assertGreater(np.ptp(frame, axis=0).max(), 10)
+        self.assertGreater(np.ptp(frame, axis=1).max(), 10)
+        following = colour_field("dynamic+", x, y, FALLBACK, .6001)
+        self.assertLess(np.abs(frame - following).max(), 1)
+        self.assertTrue(np.all(frame >= FALLBACK.min(axis=0)))
+        self.assertTrue(np.all(frame <= FALLBACK.max(axis=0)))
+        np.testing.assert_allclose(colour_field("dynamic+", x, y, FALLBACK, 0),
+                                   colour_field("dynamic+", x, y, FALLBACK, 100), atol=1e-10)
+
+    def test_spectrum_uses_moving_palette_and_energy_controls_speed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.txt"
+            for colours in ("dynamic", "dynamic+"):
+                settings = Settings(path, {"colours": colours}).effective()
+                quiet, loud = Spectrum(RATE), Spectrum(RATE)
+                quiet.filtered.fill(.1)
+                loud.filtered.fill(1)
+                first = loud.render(0., .1, settings, FALLBACK)
+                second = loud.render(.1, .1, settings, FALLBACK)
+                self.assertGreater(np.abs(second - first).max(), .01)
+                quiet.render(0., .2, settings, FALLBACK)
+                self.assertGreater(loud.colour_phase, quiet.colour_phase)
+                expected = draw_pattern(21, loud.phase, FALLBACK, colours, loud.colour_phase)
+                np.testing.assert_allclose(second[FIRST_SPECTRUM_ROW:],
+                                           expected[FIRST_SPECTRUM_ROW:])
+                replacement = FALLBACK[:, ::-1].copy()
+                changed = loud.render(.1, 0., settings, replacement)
+                self.assertGreater(np.abs(changed - second).max(), 1)
+                settings.anim_speed = 0
+                frozen = loud.render(.2, .1, settings, replacement)
+                np.testing.assert_allclose(changed, frozen)
 
 
 class RendererTests(unittest.TestCase):

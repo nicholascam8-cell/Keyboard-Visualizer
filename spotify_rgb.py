@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 
+from visualizer_colours import colour_field
 from visualizer_artwork import FALLBACK, start_artwork
 from visualizer_audio import BLOCK, RATE, open_audio
 from visualizer_settings import command_line, output_fps
@@ -157,11 +158,8 @@ class Pattern:
             distance = y if mode == "top-down" else 1-y
             light = np.clip(6*strength - 5*distance, 0, 1)
         colors = palette[bands]
-        if colours == "dynamic":
-            pos = ((x + y*.10 - self.phase) % 1)*3
-            index = pos.astype(int) % 3
-            fraction = (pos % 1)[:, None]
-            colors = palette[index]*(1-fraction) + palette[(index+1)%3]*fraction
+        if colours in ("dynamic", "dynamic+"):
+            colors = colour_field(colours, x, y, palette, self.phase)
         # A single multiplier per key preserves channel ratios even at full output.
         if mode == "random":
             light = np.minimum(1.28 * light, 255 / np.maximum(colors.max(axis=1), 1))

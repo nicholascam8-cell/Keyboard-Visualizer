@@ -62,7 +62,7 @@ def or_auto(parse):
 # Default, value parser, CLI help. Upstream numbers follow VisualizerDefines.h.
 SCHEMA = {
     "mode": ("bottom-up", choice(*MODES), "lighting effect: " + ", ".join(MODES)),
-    "colours": ("static", choice("static", "dynamic"), "Kawarp colour movement"),
+    "colours": ("static", choice("static", "dynamic", "dynamic+"), "Kawarp colours: static, dynamic gradient, or dynamic+ fluid"),
     "fps": (None, or_auto(number(int, 1, 480)), "lighting FPS cap (40 unless delay is set)"),
     "brightness": (1., number(float, 0, 1), "overall brightness from 0 to 1"),
     "gain": (1., number(float, 0, 10, exclusive_min=True), "audio sensitivity multiplier"),
@@ -276,7 +276,7 @@ def command_line(argv=None):
     parser = argparse.ArgumentParser(
         description="Audio-reactive OpenRGB lighting and spectrum preview",
         epilog="Use key=value or --key value at startup. Live commands: mode EFFECT, "
-               "colours static|dynamic, fps NUMBER, set KEY VALUE, status.")
+               "colours static|dynamic|dynamic+, fps NUMBER, set KEY VALUE, status.")
     parser.add_argument("--settings", type=Path, help="profile path (default: settings.txt beside script)")
     for key, (_, parse, help_text) in SCHEMA.items():
         flags = ["--" + key.replace("_", "-")]

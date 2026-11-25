@@ -118,7 +118,7 @@ python spotify_rgb.py --demo mode=random colours=dynamic artwork=cover.jpg
 | `random` | Waves, lines, ripples, and bursts respond to sound. |
 | `spectrum` | The CalcProgrammer layout uses vertical frequency bars for keyboard matrices, a bass bar for linear strips, and a bass-reactive colour for single zones. |
 
-The original effects support `colours=static` for fixed palette regions and `colours=dynamic` for a moving gradient. Keyboards that report a matrix use their own layout. When a full-size Apex 7 lacks a matrix, the existing Apex profile supplies one.
+All effects, including spectrum with the Kawarp pattern (ID 21), support `colours=static` for fixed palette regions, `colours=dynamic` for a smooth moving gradient, and `colours=dynamic+` for fluid pools of album colour that swirl and blend across both keyboard axes. Motion speeds up with audio intensity. Spectrum also scales motion with `anim_speed`, and a value of 0 freezes it. Keyboards that report a matrix use their own layout. When a full-size Apex 7 lacks a matrix, the existing Apex profile supplies one.
 
 ## Change settings from the terminal
 
@@ -143,6 +143,7 @@ The following commands save changes to `settings.txt` and apply rendering change
 ```sh
 python spotify_rgb.py mode random
 python spotify_rgb.py colours dynamic
+python spotify_rgb.py colours dynamic+
 python spotify_rgb.py fps 120
 python spotify_rgb.py mode spectrum
 python spotify_rgb.py set amplitude 150

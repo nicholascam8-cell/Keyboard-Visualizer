@@ -7,6 +7,7 @@ by Adam Honse (CalcProgrammer1). See THIRD_PARTY.md for the source revision.
 import numpy as np
 
 from visualizer_audio import BLOCK
+from visualizer_colours import colour_field
 
 WIDTH, HEIGHT = 256, 64
 BAR_ROW, SOLID_ROW, FIRST_SPECTRUM_ROW = 0, 1, 2
@@ -24,7 +25,9 @@ _STATIC = (
 _WINDOWS = (np.ones(BLOCK), np.hanning(BLOCK), np.hamming(BLOCK), np.blackman(BLOCK))
 
 
-def draw_pattern(mode, phase, palette):
+def draw_pattern(mode, phase, palette, colours="static", colour_phase=0.):
+    if mode == 21 and colours in ("dynamic", "dynamic+"):
+        return colour_field(colours, _X / (WIDTH - 1), _Y / (HEIGHT - 1), palette, colour_phase)
     if mode < len(_SOLIDS):
         return np.broadcast_to(_SOLIDS[mode], (HEIGHT, WIDTH, 3))
     if mode < 15 or mode == 21:
@@ -63,6 +66,8 @@ class Spectrum:
         self.peak = np.zeros(WIDTH)
         self.filtered = np.zeros(WIDTH)
         self.phase = 0.
+        self.colour_phase = 0.
+        self.colour_speed = .05
         self.last_active = None
 
     def read(self, samples, dt, settings):
@@ -90,9 +95,14 @@ class Spectrum:
 
     def render(self, now, dt, settings, palette):
         self.phase = (self.phase + dt * 60 * settings.anim_speed / 100) % 360
-        foreground = draw_pattern(settings.frgd_mode, self.phase, palette)
-        background = draw_pattern(settings.bkgd_mode, self.phase, palette) * (settings.bkgd_bright / 100)
         bass = float(self.filtered[5])
+        speed = .05 + .7 * float(self.filtered.mean()) + .5 * bass
+        self.colour_speed += (speed - self.colour_speed) * (-np.expm1(-dt / .25))
+        self.colour_phase = (self.colour_phase + dt * self.colour_speed * settings.anim_speed / 100) % 100
+        foreground = draw_pattern(settings.frgd_mode, self.phase, palette,
+                                  settings.colours, self.colour_phase)
+        background = draw_pattern(settings.bkgd_mode, self.phase, palette,
+                                  settings.colours, self.colour_phase) * (settings.bkgd_bright / 100)
         if self.last_active is None or self.filtered.max() >= .0001:
             self.last_active = now
         timeout = settings.background_timeout / 100
