@@ -115,7 +115,23 @@ The original effects support `colours=static` for fixed palette regions and `col
 
 ## Change settings from the terminal
 
-Open a second terminal in the same folder. The following commands save changes to `settings.txt` and apply rendering changes to a running session within about 0.35 seconds:
+Open a second terminal in the same project folder. Activate the virtual environment in that terminal before using the `python` commands below.
+
+On macOS and Linux:
+
+```sh
+source .venv/bin/activate
+```
+
+On Windows PowerShell:
+
+```powershell
+.\\.venv\\Scripts\\Activate.ps1
+```
+
+Alternatively, use `.venv/bin/python` on macOS and Linux or `.\\.venv\\Scripts\\python.exe` on Windows in place of `python`. The explicit paths also work when activation is unavailable.
+
+The following commands save changes to `settings.txt` and apply rendering changes to a running session within about 0.35 seconds:
 
 ```sh
 python spotify_rgb.py mode random
