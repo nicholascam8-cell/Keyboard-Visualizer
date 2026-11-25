@@ -89,6 +89,24 @@ class SettingsTests(unittest.TestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_default_spectrum_tracks_album_palette_with_dim_background(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(Path(tmp) / "settings.txt").effective()
+        self.assertEqual((settings.frgd_mode, settings.bkgd_mode, settings.bkgd_bright),
+                         (21, 21, 15))
+        spectrum = Spectrum(RATE)
+        first = np.array([[210, 50, 20], [20, 180, 70], [40, 60, 220]], dtype=float)
+        second = first[:, ::-1].copy()
+        for palette in (first, second):
+            pattern = draw_pattern(21, 0, palette)
+            spectrum.filtered.fill(1)
+            frame = spectrum.render(1., 0., settings, palette)
+            np.testing.assert_allclose(frame[FIRST_SPECTRUM_ROW:], pattern[FIRST_SPECTRUM_ROW:])
+            spectrum.filtered.fill(0)
+            frame = spectrum.render(1., 0., settings, palette)
+            np.testing.assert_allclose(frame[FIRST_SPECTRUM_ROW:], .15 * pattern[FIRST_SPECTRUM_ROW:])
+
+
     def test_spectrum_finds_a_tone_and_uses_distinct_output_rows(self):
         settings = Settings(Path("unused-settings.txt"), {
             "bkgd_mode": 0, "frgd_mode": 1, "avg_size": 4, "amplitude": 140,

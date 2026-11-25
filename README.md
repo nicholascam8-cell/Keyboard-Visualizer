@@ -91,7 +91,14 @@ Install [Node.js](https://nodejs.org/en/download) and run `npm ci` from the proj
 - **Windows** can read cover thumbnails from media apps that publish a Windows media session. In the same Python environment, run `python -m pip install winrt-Windows.Media.Control winrt-Windows.Storage.Streams`. [Windows media API package](https://pypi.org/project/winrt-Windows.Media.Control/)
 - **Linux** reads covers from playing MPRIS apps when `playerctl` is installed. [Playerctl](https://github.com/altdesktop/playerctl)
 
-On all three systems, use `--artwork "path/to/cover.jpg"` to choose an image. The built-in palette is available automatically when artwork or Kawarp is unavailable. Use `--palette off` to select it explicitly. In spectrum mode, set `frgd_mode=21` or `bkgd_mode=21` to use Kawarp swatches.
+On all three systems, use `--artwork "path/to/cover.jpg"` to choose an image. The built-in palette is available automatically when artwork or Kawarp is unavailable. Use `--palette off` to select it explicitly. Spectrum mode uses Kawarp swatches for both its bars and background by default. The background uses 15% brightness so the bars stand out. Existing profiles keep their saved pattern choices. To apply the album colours to an existing profile, run these commands in the activated project environment, then restart with artwork enabled:
+
+```sh
+python spotify_rgb.py set frgd_mode 21
+python spotify_rgb.py set bkgd_mode 21
+python spotify_rgb.py set bkgd_bright 15
+python spotify_rgb.py --mode spectrum --palette auto
+```
 
 ## Choose a display
 
