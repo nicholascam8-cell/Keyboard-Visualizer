@@ -10,6 +10,7 @@ from types import SimpleNamespace as Obj
 
 import numpy as np
 import spotify_rgb as rgb
+from visualizer_settings import Settings
 
 
 def zone(kind, led_ids, matrix=None):
@@ -44,8 +45,8 @@ class LayoutTests(unittest.TestCase):
                        active_mode=0, leds=[0], zones=[])
         keyboards = [device(0, "KEYBOARD", "First"), device(1, "KEYBOARD", "Second")]
         client = Obj(devices=keyboards + [device(2, "MOUSE", "Third")])
-        args = Obj(keyboard_name="", mouse_name="", mic_name="", fps=40)
-        with patch.dict(sys.modules, {"openrgb": Obj(OpenRGBClient=lambda: client)}):
+        args = Settings(Path("unused-settings.txt"), {"mouse_name": "", "mic_name": ""}).effective()
+        with patch.dict(sys.modules, {"openrgb": Obj(OpenRGBClient=lambda **_: client)}):
             _, lights = rgb.connect(args)
             self.assertEqual([item.device.name for item in lights], ["First", "Second"])
             args.keyboard_name = "sec"

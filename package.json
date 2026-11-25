@@ -1,0 +1,7 @@
+{
+  "name": "keyboard-visualizer",
+  "private": true,
+  "dependencies": {
+    "@kawarp/core": "1.4.0"
+  }
+}

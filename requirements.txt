@@ -1,0 +1,6 @@
+numpy>=1.26
+openrgb-python>=0.3.6
+Pillow>=10
+requests>=2.31
+PyAudio>=0.2.14; sys_platform == "darwin"
+PyAudioWPatch>=0.2.12.7; sys_platform == "win32"

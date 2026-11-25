@@ -1,27 +1,21 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Modified 2026-11-24: OpenRGB keyboard discovery and zone mapping.
-"""Spotify artwork → Kawarp colours; BlackHole audio → three keyboard level meters.
-Place next to node_modules/@kawarp/core and run through start-keyboard-music.command.
-"""
-from dataclasses import dataclass
-import argparse
-import io
-import os
-from pathlib import Path
-import shutil
-import sys
-import signal
-import subprocess
-import threading
-import time
+"""Audio-reactive OpenRGB lighting with original effects and an optional spectrum."""
+
 from collections import deque
 from contextlib import ExitStack
+from dataclasses import dataclass
+import signal
+import threading
+import time
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
-BLOCK = 1024
-FALLBACK = np.array([[60, 120, 230], [180, 75, 165], [65, 190, 140]], dtype=float)
+from visualizer_colours import colour_field
+from visualizer_artwork import FALLBACK, start_artwork
+from visualizer_audio import BLOCK, RATE, open_audio
+from visualizer_settings import command_line, output_fps
+from visualizer_spectrum import BAR_ROW, FIRST_SPECTRUM_ROW, HEIGHT, SOLID_ROW, WIDTH, Spectrum
+
 # Physical LED IDs, including the navigation cluster and number pad.
 PHYSICAL_MAP = [
     [37, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67],
@@ -39,81 +33,6 @@ ROW_POSITIONS = [
     [0, 2.25, 3.25, 4.25, 5.25, 6.25, 7.25, 8.25, 9.25, 10.25, 11.25, 12.25, 17, 20, 21, 22, 23],
     [0, 1.25, 2.5, 3.75, 10.0, 11.25, 12.5, 13.75, 16, 17, 18, 20, 22],
 ]
-
-# Render once on track change. Select representative *rendered pixels* so two
-# different hues don't get averaged into a colour missing from the artwork.
-KAWARP_JS = """
-import {frame} from '@kawarp/core/frame';
-import {readFileSync} from 'node:fs';
-const src = readFileSync(0);
-const pixels = frame(src, 64, 64, 24, 12, {
-  blurPasses: 3, saturation: 1, tintIntensity: 0, dithering: 0, time: 0
-});
-process.stdout.write(Buffer.from(pixels));
-"""
-SPOTIFY = '''
-if application "Spotify" is not running then return ""
-tell application "Spotify"
-    if player state is not playing then return ""
-    return (name of current track) & linefeed & (artwork url of current track)
-end tell
-'''
-
-
-def node_binary():
-    for path in [shutil.which("node"), "/opt/homebrew/bin/node", "/usr/local/bin/node"]:
-        if path and os.access(path, os.X_OK):
-            return path
-    raise RuntimeError("Node.js is missing. Install Node.js, then install @kawarp/core@1.4.0 in the project folder.")
-
-
-def kawarp_palette(node, rgba):
-    proc = subprocess.run([node, "--input-type=module", "-e", KAWARP_JS],
-                          input=rgba, capture_output=True, cwd=ROOT, timeout=12)
-    if proc.returncode:
-        raise RuntimeError("Kawarp failed. In the project folder run npm install @kawarp/core@1.4.0\n"
-                           + proc.stderr.decode(errors="replace")[:500])
-    pixels = np.frombuffer(proc.stdout, np.uint8).reshape(12, 24, 4)[:, :, :3]
-    swatches = []
-    for region in np.array_split(pixels, 3, axis=1):
-        rgb = region.reshape(-1, 3).astype(float)
-        # Ignore the darkest quarter where a cover uses a black border.
-        strength = rgb.max(axis=1)
-        candidates = rgb[strength >= np.percentile(strength, 25)]
-        centre = np.median(candidates, axis=0)
-        swatches.append(candidates[np.argmin(np.sum((candidates - centre) ** 2, axis=1))])
-    return visible(np.array(swatches), pixels)
-
-
-def watch_art(node, updates, stop):
-    import requests
-    from PIL import Image
-    last_url = last_error = last_song = None
-    while not stop.is_set():
-        try:
-            result = subprocess.run(["/usr/bin/osascript", "-e", SPOTIFY], capture_output=True,
-                                    text=True, check=True, timeout=5)
-            song, sep, url = result.stdout.strip().rpartition("\n")
-            if sep and url and url != last_url:
-                res = requests.get(url, timeout=(3, 6))
-                res.raise_for_status()
-                with Image.open(io.BytesIO(res.content)) as image:
-                    rgba = image.convert("RGB").resize((64, 64), Image.Resampling.BOX).convert("RGBA")
-                    colors = kawarp_palette(node, rgba.tobytes())
-                cached = colors
-                last_url = url
-                print(f"Kawarp • {song} • " + " ".join("#%02x%02x%02x" % tuple(c.astype(int)) for c in colors))
-            if sep and url == last_url and (song, url) != last_song:
-                updates.append(cached)
-                last_song = (song, url)
-            last_error = None
-        except Exception as exc:
-            message = str(getattr(exc, "stderr", "") or exc).strip()
-            if message != last_error:
-                print("Spotify artwork unavailable:", message)
-                last_error = message
-        stop.wait(2)
-
 
 class Levels:
     """Measure stereo band power. Scale each band against recent musical peaks."""
@@ -140,51 +59,6 @@ class Levels:
         self.envelope += (target - self.envelope) * (1 - np.exp(-dt / tau))
         return self.envelope, rms
 
-
-SETTINGS = ROOT / ".visualizer-settings"
-MODES = ("bottom-up", "horizontal", "top-down", "central", "whole", "random")
-OPTIONS = {"mode": MODES, "colours": ("static", "dynamic")}
-
-def setting(key, default):
-    try:
-        value = (SETTINGS / key).read_text().strip()
-        if key == "fps":
-            return int(value) if 1 <= int(value) <= 480 else default
-        return value if value in OPTIONS[key] else default
-    except (OSError, ValueError):
-        return default
-
-def control():
-    parser = argparse.ArgumentParser(description="Change live visualizer settings")
-    parser.add_argument("key", choices=["mode", "colours", "fps", "status"])
-    parser.add_argument("value", nargs="?")
-    args = parser.parse_args()
-    if args.key == "status":
-        for key, default in [("mode", "bottom-up"), ("colours", "static"), ("fps", 40)]:
-            print(key, setting(key, default))
-        return
-    value = args.value or ""
-    valid = value.isascii() and value.isdecimal() and 1 <= int(value) <= 480 if args.key == "fps" else value in OPTIONS[args.key]
-    if not valid:
-        parser.error("Choose " + (", ".join(OPTIONS[args.key]) if args.key in OPTIONS else "1–480"))
-    SETTINGS.mkdir(exist_ok=True)
-    temp = SETTINGS / f".{args.key}-{os.getpid()}"
-    temp.write_text(value)
-    temp.replace(SETTINGS / args.key)
-    print(args.key, value)
-
-def visible(swatches, pixels):
-    pool = pixels.reshape(-1, 3).astype(float)
-    peak = pool.max(axis=1)
-    candidates = pool[peak >= max(10, peak.max() * .4)]
-    for i, color in enumerate(swatches):
-        if max(color) < 5 or (max(color) < 24 and peak.max() > 3*max(color)):
-            if len(candidates):
-                color = candidates[i * (len(candidates) - 1) // 2]
-            else:
-                color = FALLBACK[i]
-        swatches[i] = color * max(1, 235 / max(color))
-    return swatches
 
 @dataclass
 class Effect:
@@ -284,11 +158,8 @@ class Pattern:
             distance = y if mode == "top-down" else 1-y
             light = np.clip(6*strength - 5*distance, 0, 1)
         colors = palette[bands]
-        if colours == "dynamic":
-            pos = ((x + y*.10 - self.phase) % 1)*3
-            index = pos.astype(int) % 3
-            fraction = (pos % 1)[:, None]
-            colors = palette[index]*(1-fraction) + palette[(index+1)%3]*fraction
+        if colours in ("dynamic", "dynamic+"):
+            colors = colour_field(colours, x, y, palette, self.phase)
         # A single multiplier per key preserves channel ratios even at full output.
         if mode == "random":
             light = np.minimum(1.28 * light, 255 / np.maximum(colors.max(axis=1), 1))
@@ -518,11 +389,12 @@ def axis_positions(table, count, first, last):
     return (np.arange(count, dtype=float) + .5) / count
 
 
-def keyboard_layout(device):
+def keyboard_layout(device, *, include_linear=False):
     count = len(device.leds)
     x = np.full(count, .5)
     y = np.full(count, .5)
     solid = np.ones(count, dtype=bool)
+    linear = np.zeros(count, dtype=bool)
     has_matrix = False
     for zone in device.zones:
         kind = zone.type.name
@@ -538,237 +410,339 @@ def keyboard_layout(device):
                     led = zone.leds[local].id
                     if 0 <= led < count:
                         x[led], y[led], solid[led] = xs[col], ys[row], False
+                        linear[led] = False
                         has_matrix = True
         elif kind == "LINEAR":
             xs = axis_positions(LINEAR_X, len(zone.leds), 0, 255)
             for led, pos in zip(zone.leds, xs):
                 if 0 <= led.id < count:
-                    x[led.id], solid[led.id] = pos, False
+                    x[led.id], solid[led.id], linear[led.id] = pos, False, True
     # Keep the known full-size Apex profile for firmware without a matrix.
     if not has_matrix and device.name.casefold() == "steelseries apex 7" and count == 111:
         for row, (ids, positions) in enumerate(zip(PHYSICAL_MAP, ROW_POSITIONS)):
             for led, pos in zip(ids, positions):
-                x[led], y[led], solid[led] = pos / 23, row / 5, False
-    return x, y, solid
+                x[led], y[led], solid[led], linear[led] = pos / 23, row / 5, False, False
+    return (x, y, solid, linear) if include_linear else (x, y, solid)
+
+
+def compatible_modes(device):
+    for mode in device.modes:
+        name = mode.name.strip().casefold()
+        per_led = mode.color_mode.name == "PER_LED" and bool(device.leds)
+        if name == "direct" and per_led:
+            yield True, mode
+        elif name in ("static", "fixed", "solid", "solid color", "solid colour", "direct"):
+            if per_led or mode.color_mode.name == "MODE_SPECIFIC":
+                yield False, mode
 
 
 class Lights:
-    def __init__(self, device, role, mode, rate):
-        self.device, self.role = device, role
-        self.live = mode.name.lower() == "direct" and mode.color_mode.name == "PER_LED"
-        if device.modes[device.active_mode].name != mode.name:
+    def __init__(self, device, role, mode, live):
+        self.device, self.role, self.live = device, role, live
+        if not (0 <= device.active_mode < len(device.modes) and device.modes[device.active_mode] is mode):
             device.set_mode(mode)
-        self.interval = 1 / rate
-        self.next_write = 0
+        self.next_write = 0.
         self.previous = None
-        self.pattern = Pattern()
-        self.mode, self.colours = "bottom-up", "static"
-        if role == "Keyboard":
-            self.x, self.y, self.solid = keyboard_layout(device)
-            self.bands = np.clip((self.x * 3).astype(int), 0, 2)
-            self.sequence = KeySequence(self.x, self.y)
-        print(f"{role}: {device.name} • {mode.name} • " + ("live audio" if self.live else "album colour only"))
+        self.sequence = None
+        if live:
+            self.x, self.y, self.solid, self.linear = keyboard_layout(device, include_linear=True)
+            self.spectrum_cols = np.rint(self.x * (WIDTH - 1)).astype(int)
+            rows = FIRST_SPECTRUM_ROW + np.rint(self.y * (HEIGHT - 1 - FIRST_SPECTRUM_ROW)).astype(int)
+            rows[self.linear] = BAR_ROW
+            rows[self.solid] = SOLID_ROW
+            self.spectrum_cols[self.solid] = 0
+            self.spectrum_rows = rows
+            if role in ("Keyboard", "Device"):
+                self.pattern = Pattern()
+                self.bands = np.clip((self.x * 3).astype(int), 0, 2)
+                self.sequence = KeySequence(self.x, self.y)
+                self.last_frame = self.sequence.frame
+        behavior = "live audio" if live else "static palette colour"
+        print(f"{role}: {device.name} • {mode.name} • {behavior}", flush=True)
 
-    def send(self, levels, palette, brightness, now, rms=0):
-        from openrgb.utils import RGBColor
+    def send(self, settings, levels, palette, spectrum, now, dt, rms, fps):
+        if self.sequence is not None:
+            self.pattern.advance(levels, dt, rms)
         if now < self.next_write:
             return
-        self.next_write = now + self.interval
-        if self.role == "Keyboard":
-            pixels = self.pattern.render(self.mode, self.colours, self.x, self.y, self.bands, levels, palette)
+        self.next_write = now + 1 / (fps if self.role in ("Keyboard", "Device") else min(24, fps))
+        if self.live and spectrum is not None:
+            self.write_keys(spectrum[self.spectrum_rows, self.spectrum_cols])
+        elif self.sequence is not None:
+            pixels = self.pattern.render(settings.mode, settings.colours, self.x, self.y,
+                                         self.bands, levels, palette)
             if self.solid.any():
                 pixels[self.solid] = palette[np.argmax(levels)] * levels.max()
-            self.write_keys(self.sequence.update(pixels * brightness, rms, now))
-            return
+            self.write_keys(self.sequence.update(pixels * settings.brightness, rms, now))
         else:
-            if self.live:
-                band = int(np.argmax(levels))
-                color = palette[band] * levels[band] * brightness
-            else:
-                color = palette[1] * brightness
-            key = tuple(map(int, color))
-            if key != self.previous:
-                self.device.set_color(RGBColor(*key), fast=self.live)
-        self.previous = key
+            band = int(np.argmax(levels))
+            color = palette[band] * levels[band] if self.live else palette[1]
+            self.write_color(color * settings.brightness)
+
+    def write_color(self, color):
+        from openrgb.utils import RGBColor
+
+        key = tuple(map(int, color))
+        if key != self.previous:
+            self.device.set_color(RGBColor(*key), fast=self.live)
+            self.previous = key
 
     def write_keys(self, pixels):
         from openrgb.utils import RGBColor
+
         frame = np.clip(pixels, 0, 255).astype(np.uint8)
         key = frame.tobytes()
         if key != self.previous:
-            self.device.set_colors([RGBColor(*c) for c in frame.tolist()], fast=True)
+            self.device.set_colors([RGBColor(*color) for color in frame.tolist()], fast=True)
             self.previous = key
+            if self.sequence is not None:
+                self.last_frame = frame
 
-    def finish_keys(self):
-        seq = self.sequence
-        if seq.frame.any():
-            if seq.playing:
-                seq.begin(time.monotonic(), False)
-            while seq.started is not None:
-                self.write_keys(seq.blend(None, time.monotonic()))
-                if seq.started is not None:
-                    time.sleep(1/40)
-        self.write_keys(np.zeros_like(seq.frame))
+    def new_palette(self, now):
+        if self.sequence is not None:
+            self.pattern = Pattern()
+            if self.sequence.playing:
+                self.sequence.begin(now, True)
 
 
-def connect(args):
+def open_rgb(settings):
     from openrgb import OpenRGBClient
-    client = OpenRGBClient()
+
+    try:
+        return OpenRGBClient(address=settings.rgb_host, port=settings.rgb_port, name="Keyboard Visualizer")
+    except OSError as exc:
+        raise RuntimeError(f"Could not connect to OpenRGB at {settings.rgb_host}:{settings.rgb_port}. "
+                           "Start its SDK Server or use --preview-only.") from exc
+
+
+def list_rgb(client):
+    for device in client.devices:
+        modes = sorted(compatible_modes(device), key=lambda item: item[0], reverse=True)
+        support = ", ".join(f"{mode.name} ({'live' if live else 'static'})" for live, mode in modes)
+        print(f"{device.id}  {device.name} [{device.type.name}] – {support or 'no compatible mode'}")
+
+
+def connect(settings):
+    client = open_rgb(settings)
     targets = []
-    for role, match in [("Keyboard", args.keyboard_name), ("Mouse", args.mouse_name), ("Mic", args.mic_name)]:
-        candidates = []
-        if role != "Keyboard" and not match:
-            continue
-        for device in client.devices:
-            if role == "Keyboard" and device.type.name != "KEYBOARD":
-                continue
-            if match and match.casefold() not in device.name.casefold():
-                continue
-            for mode in device.modes:
-                live = mode.name.lower() == "direct" and mode.color_mode.name == "PER_LED" and device.leds
-                static = mode.name.lower() in ("static", "fixed", "solid", "solid color", "solid colour", "direct") and mode.color_mode.name in ("PER_LED", "MODE_SPECIFIC")
-                if live or (role != "Keyboard" and static):
-                    candidates.append((bool(live), len(device.leds), device, mode))
+    selectors = [name.strip().casefold() for name in settings.device.split(",") if name.strip()]
+    if settings.device and not selectors:
+        client.disconnect()
+        raise RuntimeError("--device needs at least one name or ID. Use --list-rgb-devices.")
+
+    def role_for(device):
+        name = device.name.casefold()
+        is_keyboard = device.type.name == "KEYBOARD"
+        if selectors:
+            if any(str(device.id) == key if key.isdecimal() else key in name for key in selectors):
+                return "Keyboard" if is_keyboard else "Device"
+        elif settings.all_devices:
+            return "Keyboard" if is_keyboard else "Device"
+        elif is_keyboard:
+            if settings.keyboard_name.casefold() in name:
+                return "Keyboard"
+        elif settings.mouse_name and settings.mouse_name.casefold() in name:
+            return "Mouse"
+        elif settings.mic_name and settings.mic_name.casefold() in name:
+            return "Mic"
+        return None
+
+    try:
         configured = set()
-        for _, _, device, mode in sorted(candidates, key=lambda c: c[:2], reverse=True):
-            if device.id in configured:
+        candidates = []
+        for device in client.devices:
+            role = role_for(device)
+            if role is None:
+                continue
+            for live, mode in compatible_modes(device):
+                candidates.append((live, len(device.leds), device, role, mode))
+        accessory_roles = set()
+        for live, _, device, role, mode in sorted(candidates, key=lambda item: item[:2], reverse=True):
+            if device.id in configured or role in accessory_roles:
                 continue
             try:
-                targets.append(Lights(device, role, mode, args.fps if role == "Keyboard" else min(args.fps, 24)))
-                configured.add(device.id)
-                if role != "Keyboard":
-                    break
+                targets.append(Lights(device, role, mode, live))
             except Exception as exc:
-                print(role, device.name, exc)
-        if not configured:
-            print(f"{role}: no suitable controller for {match or role!r}")
+                print(f"{device.name}: could not use {mode.name}: {exc}", flush=True)
+                continue
+            configured.add(device.id)
+            if role in ("Mouse", "Mic"):
+                accessory_roles.add(role)
+        if not targets:
+            raise RuntimeError("No matching OpenRGB controllers with a usable lighting mode. "
+                               "Use --list-rgb-devices to inspect them or --preview-only.")
+    except BaseException:
+        client.disconnect()
+        raise
     return client, targets
 
 
-def main():
-    import pyaudio
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--palette", choices=["auto"], default="auto")
-    parser.add_argument("--brightness", type=float, default=1.0)
-    parser.add_argument("--gain", type=float, default=1.0)
-    parser.add_argument("--fps", "--keyboard-fps", type=int, default=40)
-    parser.add_argument("--audio-device-name", default="BlackHole 2ch")
-    parser.add_argument("--audio-device", type=int)
-    parser.add_argument("--audio", choices=["mono", "stereo"], default="stereo")
-    parser.add_argument("--list-audio-devices", action="store_true")
-    parser.add_argument("--keyboard-name", default="", help="Select keyboards by name substring (default: all direct RGB keyboards)")
-    parser.add_argument("--mouse-name", default="G203")
-    parser.add_argument("--mic-name", default="888-000534")
-    args = parser.parse_args()
-    if not (0 <= args.brightness <= 1 and 0 < args.gain <= 10 and 1 <= args.fps <= 480):
-        parser.error("Use brightness 0–1, gain above 0 through 10 and fps 1–480.")
-    with ExitStack() as cleanup:
-        audio = pyaudio.PyAudio()
-        cleanup.callback(audio.terminate)
-        inputs = [audio.get_device_info_by_index(i) for i in range(audio.get_device_count())]
-        inputs = [d for d in inputs if d["maxInputChannels"] > 0]
-        if args.list_audio_devices:
-            for d in inputs:
-                print(d["index"], d["name"])
-            return
-        matches = [d for d in inputs if (d["index"] == args.audio_device if args.audio_device is not None
-                   else args.audio_device_name.casefold() in d["name"].casefold())]
-        if len(matches) != 1:
-            raise RuntimeError("Audio input missing or ambiguous. Run with --list-audio-devices and pass --audio-device INDEX.")
-        dev = matches[0]
-        rate = int(dev["defaultSampleRate"])
-        channels = min(2 if args.audio == "stereo" else 1, int(dev["maxInputChannels"]))
-        node = node_binary()
-        # Verify the actual renderer before opening hardware.
-        kawarp_palette(node, bytes([64, 128, 192, 255]) * 4096)
-        buffer = deque(maxlen=1)
-        def capture(data, count, timing, status):
-            if count == BLOCK:
-                buffer.append(data)
-            return None, pyaudio.paContinue
-        stream = audio.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True,
-                            input_device_index=dev["index"], frames_per_buffer=BLOCK, stream_callback=capture)
-        cleanup.callback(stream.close)
-        print(f"Audio: {dev['name']} • {rate} Hz. Waiting for Spotify artwork.")
-        for attempt in range(6):
-            client, targets = connect(args)
-            if any(t.role == "Keyboard" for t in targets) or attempt == 5:
-                break
-            getattr(client, "disconnect", lambda: None)()
-            time.sleep(1)
-        cleanup.callback(getattr(client, "disconnect", lambda: None))
-        if not targets:
-            raise RuntimeError("No matching RGB controllers. Check OpenRGB's Devices tab.")
-        stop = threading.Event()
-        cleanup.callback(stop.set)
-        signal.signal(signal.SIGTERM, lambda *_: stop.set())
-        colors = deque(maxlen=1)
-        threading.Thread(target=watch_art, args=(node, colors, stop), daemon=True).start()
-        meter = Levels(rate, args.gain)
-        palette = FALLBACK
-        last_audio = previous = time.monotonic()
-        next_log = next_settings = previous
-        fps = args.fps
-        silent = np.zeros((BLOCK, channels))
-        levels = np.zeros(3)
-        rms = 0
+def finish_lights(targets):
+    fading = []
+    start = time.monotonic()
+    for target in targets:
+        if not target.live:
+            continue
         try:
-            while not stop.is_set():
-                now = time.monotonic()
-                dt = min(0.25, now - previous)
-                previous = now
-                if now >= next_settings:
-                    fps = setting("fps", args.fps)
-                    mode = setting("mode", "bottom-up")
-                    colours = setting("colours", "static")
-                    for target in targets:
-                        target.mode, target.colours = mode, colours
-                        target.interval = 1 / (fps if target.role == "Keyboard" else min(24, fps))
-                    next_settings = now + .35
-                if colors:
-                    palette = colors.pop()
-                    for target in targets:
-                        if target.role == "Keyboard":
-                            target.pattern = Pattern()
-                            if target.sequence.playing:
-                                target.sequence.begin(now, True)
-                if buffer:
-                    samples = np.frombuffer(buffer.pop(), np.int16).reshape(BLOCK, channels) / 32768.
-                    levels, rms = meter.read(samples, min(now - last_audio, 0.25))
-                    last_audio = now
-                elif now - last_audio > 0.15:
-                    levels, rms = meter.read(silent, dt)
-                for target in targets:
-                    try:
-                        if target.role == "Keyboard":
-                            target.pattern.advance(levels, dt, rms)
-                        target.send(levels, palette, args.brightness, now, rms)
-                    except Exception as exc:
-                        print(f"{target.device.name}: write failed: {exc}")
-                        target.next_write = now + 2
-                if now >= next_log:
-                    print(f"rms={rms:.4f}  bass/mid/high=" + "/".join(f"{v:.0%}" for v in levels))
-                    next_log = now + 2
-                stop.wait(max(0, 1 / fps - (time.monotonic() - now)))
-        finally:
+            seq = target.sequence
+            if seq is not None and target.last_frame.any():
+                seq.frame = target.last_frame
+                seq.begin(start, False)
+                fading.append(target)
+            else:
+                target.write_color((0, 0, 0))
+        except Exception:
+            continue
+    while fading:
+        now = time.monotonic()
+        remaining = []
+        for target in fading:
+            try:
+                target.write_keys(target.sequence.blend(None, now))
+                if target.sequence.started is not None:
+                    remaining.append(target)
+            except Exception:
+                pass
+        fading = remaining
+        if fading:
+            time.sleep(1 / 40)
+
+
+def run(settings_file, args, cleanup):
+    settings = settings_file.effective()
+    if args.list_rgb_devices:
+        client = open_rgb(settings)
+        cleanup.callback(client.disconnect)
+        list_rgb(client)
+        return
+    if args.list_audio_devices:
+        open_audio(settings, True, cleanup)
+        return
+    if not (settings.rgb or settings.preview or settings.startminimized or settings.demo):
+        raise RuntimeError("Enable OpenRGB or use --preview-only.")
+
+    stop = threading.Event()
+    previous_handler = signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    cleanup.callback(signal.signal, signal.SIGTERM, previous_handler)
+    preview = None
+    if settings.preview or settings.startminimized or settings.demo:
+        try:
+            from visualizer_preview import Preview
+            preview = Preview(stop, settings.startminimized)
+        except Exception as exc:
+            raise RuntimeError(f"Could not open the desktop preview. Check Tk and your display: {exc}") from exc
+        cleanup.callback(preview.root.destroy)
+
+    audio = None if settings.demo else open_audio(settings, False, cleanup)
+    rate, channels = (audio.rate, audio.channels) if audio else (RATE, 1)
+    name = audio.name if audio else "Generated audio"
+    print(f"Audio: {name} • {rate} Hz", flush=True)
+    targets = []
+    if settings.rgb and not settings.demo:
+        client, targets = connect(settings)
+        cleanup.callback(client.disconnect)
+        cleanup.callback(finish_lights, targets)
+
+    colors = deque(maxlen=1)
+    cleanup.callback(stop.set)
+    start_artwork(settings, colors, stop)
+    meter, spectrum = Levels(rate, settings.gain), Spectrum(rate)
+    preview_pattern = Pattern() if preview else None
+    if preview:
+        grid_y, grid_x = np.mgrid[0:1:complex(0, HEIGHT), 0:1:complex(0, WIDTH)]
+        x, y = grid_x.ravel(), grid_y.ravel()
+        bands = np.minimum((x * 3).astype(int), 2)
+    palette = FALLBACK
+    levels, rms = np.zeros(3), 0.
+    silent = np.zeros((BLOCK, channels))
+    if settings.demo:
+        samples_t = np.arange(BLOCK) / rate
+    start = previous = last_audio = time.monotonic()
+    next_log = next_settings = next_preview = start
+    last_settings_error = None
+    while not stop.is_set():
+        now = time.monotonic()
+        dt = min(.25, now - previous)
+        previous = now
+        if now >= next_settings:
+            try:
+                settings = settings_file.reload()
+                meter.gain = settings.gain
+                last_settings_error = None
+            except (OSError, ValueError) as exc:
+                if last_settings_error != str(exc):
+                    print(f"Keeping active settings. {exc}", flush=True)
+                    last_settings_error = str(exc)
+            next_settings = now + .35
+        fps = output_fps(settings)
+        if colors:
+            palette = colors.pop()
             for target in targets:
-                if target.live:
-                    try:
-                        if target.role == "Keyboard":
-                            target.finish_keys()
-                            continue
-                        target.next_write = 0
-                        target.send(np.zeros(3), palette, 0, time.monotonic())
-                    except Exception:
-                        pass
+                target.new_palette(now)
+
+        samples = None
+        audio_dt = dt
+        if audio is None:
+            elapsed = now - start
+            wave = samples_t + elapsed
+            notes = (65, 220, 900, 2400)
+            samples = sum(
+                .28 * (.35 + .65 * np.sin(elapsed * speed) ** 2) * np.sin(2 * np.pi * note * wave)
+                for note, speed in zip(notes, (2., 1.1, 1.7, .5))
+            )[:, None]
+        elif audio.frames:
+            data = audio.frames.popleft()
+            samples = np.frombuffer(data, dtype="<i2").reshape(BLOCK, channels) / 32768.
+            if settings.audio == "mono" and channels > 1:
+                samples = samples.mean(axis=1, keepdims=True)
+            audio_dt = min(.25, now - last_audio)
+            last_audio = now
+        elif audio.process is not None and audio.process.poll() is not None:
+            raise RuntimeError(f"System audio capture stopped for {name}. Check that the output is still connected.")
+        elif now - last_audio > .15:
+            samples = silent
+
+        if samples is not None:
+            levels, rms = meter.read(samples, audio_dt)
+            spectrum.read(samples, audio_dt, settings)
+        frame = spectrum.render(now, dt, settings, palette) if settings.mode == "spectrum" else None
+        for target in targets:
+            try:
+                target.send(settings, levels, palette, frame, now, dt, rms, fps)
+            except Exception as exc:
+                print(f"{target.device.name}: write failed: {exc}", flush=True)
+                target.next_write = now + 2
+        if preview:
+            preview_pattern.advance(levels, dt, rms)
+            if now >= next_preview:
+                display = frame
+                if display is None:
+                    display = preview_pattern.render(settings.mode, settings.colours, x, y, bands,
+                                                     levels, palette).reshape(HEIGHT, WIDTH, 3)
+                    display *= settings.brightness
+                preview.draw(display, settings.mode, levels, name)
+                next_preview = now + 1 / min(40, fps)
+        if now >= next_log:
+            print(f"rms={rms:.4f}  bass/mid/high=" + "/".join(f"{v:.0%}" for v in levels), flush=True)
+            next_log = now + 2
+        next_tick = now + 1 / 60
+        if targets:
+            next_tick = min(next_tick, *(target.next_write for target in targets))
+        if preview:
+            next_tick = min(next_tick, next_preview)
+        stop.wait(max(0, next_tick - time.monotonic()))
+
+
+def main():
+    parsed = command_line()
+    if parsed is not None:
+        with ExitStack() as cleanup:
+            run(*parsed, cleanup)
 
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:2] in (["mode"], ["colours"], ["fps"], ["status"]):
-            control()
-        else:
-            main()
+        main()
     except KeyboardInterrupt:
         pass
     except Exception as error:

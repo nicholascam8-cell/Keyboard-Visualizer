@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+settings.txt
+*.txt.lock
+.visualizer-settings/
+.DS_Store
