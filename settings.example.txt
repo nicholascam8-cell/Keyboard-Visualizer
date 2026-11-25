@@ -1,0 +1,41 @@
+# Copy to settings.txt or open with --settings settings.example.txt.
+# Lines use key=value. Values on the command line override this file at launch.
+mode=bottom-up
+colours=static
+brightness=1.0
+gain=1.0
+delay=25
+# Set fps to a number to override delay.
+fps=auto
+palette=auto
+
+# CalcProgrammer spectrum options become active with mode=spectrum.
+amplitude=100
+bkgd_bright=100
+avg_size=8
+decay=80
+nrml_ofst=0.04
+nrml_scl=0.5
+fltr_const=1
+anim_speed=100
+window_mode=1
+bkgd_mode=15
+frgd_mode=9
+single_color_mode=11
+avg_mode=0
+reactive_bkgd=0
+silent_bkgd=0
+background_timeout=120
+
+# The defaults use the system playback stream for the current OS.
+# Use --list-audio-devices to choose a different input.
+# audio_device_idx=auto
+# audio_device_name=
+# audio_backend=auto
+
+# OpenRGB SDK and device selection.
+# rgb_host=127.0.0.1
+# rgb_port=6742
+# device=0,Apex
+# all_devices=0
+# preview=1
