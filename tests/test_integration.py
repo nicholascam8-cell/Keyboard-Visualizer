@@ -139,6 +139,30 @@ class RendererTests(unittest.TestCase):
         self.assertTrue(np.isfinite(palette).all())
 
 
+class ArtworkStartupTests(unittest.TestCase):
+    def test_successful_kawarp_check_starts_artwork_worker(self):
+        from collections import deque
+        import threading
+        import visualizer_artwork as artwork
+
+        updates = deque(maxlen=1)
+        stop = threading.Event()
+        called = threading.Event()
+        settings = Obj(palette="auto", artwork="cover.jpg")
+        with (patch.object(artwork, "node_binary", return_value="node"),
+              patch.object(artwork, "kawarp_palette", return_value=FALLBACK) as renderer,
+              patch.object(artwork, "watch_art", side_effect=lambda *args: called.set()) as watch):
+            artwork.start_artwork(settings, updates, stop)
+            self.assertTrue(called.wait(timeout=2))
+            watch.assert_called_once()
+            node, source, actual_updates, actual_stop = watch.call_args.args
+            self.assertEqual(node, "node")
+            self.assertTrue(callable(source))
+            self.assertIs(actual_updates, updates)
+            self.assertIs(actual_stop, stop)
+            renderer.assert_called_once()
+
+
 class AudioTests(unittest.TestCase):
     def test_name_match_and_explicit_audio_index(self):
         sources = [(1, "Speakers"), (2, "USB Speakers")]
