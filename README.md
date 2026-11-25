@@ -6,12 +6,24 @@ Hardware control works through OpenRGB. A Direct per-LED mode gives you live ani
 
 ## Download and install
 
-On the [repository page](https://github.com/nicholascam8-cell/Keyboard-Visualizer), choose **Code → Download ZIP**, extract the entire folder, and open a terminal in it. If you use Git, run:
+On the [cross-platform branch page](https://github.com/nicholascam8-cell/Keyboard-Visualizer/tree/cross-platform-visualizer), confirm that the branch selector says **cross-platform-visualizer**, then choose **Code → Download ZIP**, extract the entire folder, and open a terminal in it. If you use Git, run:
 
 ```sh
-git clone https://github.com/nicholascam8-cell/Keyboard-Visualizer.git
+git clone --branch cross-platform-visualizer https://github.com/nicholascam8-cell/Keyboard-Visualizer.git
 cd Keyboard-Visualizer
 ```
+
+For an existing Git clone, open a terminal in that clone and run:
+
+```sh
+git fetch origin &&
+git switch cross-platform-visualizer &&
+git pull --ff-only
+```
+
+If Git reports local changes that would be overwritten, save or commit them before switching. Run `git branch --show-current` to confirm the branch and check that `requirements.txt` is beside `spotify_rgb.py`.
+
+If installation reports `Could not open requirements file`, check the folder and branch using the steps above, then repeat your platform's dependency installation. A later `No module named 'numpy'` error means the selected Python environment still needs the dependencies installed.
 
 Install Python 3.11 or newer. Python 3.13 is a good starting version for the commands below. Each example uses the virtual environment's Python directly, so shell activation is optional. [Python downloads](https://www.python.org/downloads/)
 
@@ -32,10 +44,10 @@ Normal runs use WASAPI loopback on the default speakers or headphones. If your p
 Install the matching Python and OpenRGB builds. Install PortAudio for PyAudio. These commands assume Homebrew and its command-line tools are installed:
 
 ```sh
-brew install portaudio
-python3.13 -m venv .venv
+brew install portaudio &&
+python3.13 -m venv .venv &&
 CPPFLAGS="-I$(brew --prefix portaudio)/include" LDFLAGS="-L$(brew --prefix portaudio)/lib" \
-  .venv/bin/python -m pip install -r requirements.txt
+  .venv/bin/python -m pip install -r requirements.txt &&
 .venv/bin/python spotify_rgb.py --demo --mode spectrum --palette off
 ```
 
