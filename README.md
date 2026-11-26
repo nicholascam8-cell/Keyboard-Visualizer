@@ -83,6 +83,27 @@ Play audio and press **Ctrl+C** to stop. By default the app selects every suppor
 
 The app runs on Windows, macOS, and desktop Linux. On another device, play audio into a capture input on one of those computers. To view the effects without compatible RGB hardware, use `--preview-only` for your audio or `--demo` for generated audio.
 
+## Start with one click on macOS
+
+After completing the dependency and audio setup, double-click `start-visualizer.command` in Finder. It opens Spotify, starts OpenRGB's local SDK server if needed, and runs the project's virtual-environment Python with your saved settings. If OpenRGB is already open with its server disabled, start the server on port 6742 from its SDK Server tab. Keep the BlackHole Multi-Output Device selected as your macOS output. Stop an existing visualizer before launching another session. Press Control-C in the launcher Terminal tab to stop.
+
+The launcher also runs `spicetify upgrade` when Spicetify is installed. A failed upgrade prints a message and continues.
+
+For a macOS Shortcut, add a **Run Shell Script** action and use the following code. This example uses Nicholas's clone location. Adjust `launcherPath` to your own clone if needed.
+
+```sh
+/usr/bin/osascript <<'APPLESCRIPT'
+set launcherPath to (POSIX path of (path to home folder)) & "Keyboard-Visualizer/Keyboard-Visualizer/start-visualizer.command"
+
+tell application "Terminal"
+    do script ("/bin/bash " & quoted form of launcherPath)
+    activate
+end tell
+APPLESCRIPT
+```
+
+The launcher uses the virtual environment directly, so Terminal tabs need no activation for startup.
+
 ## Enable Kawarp artwork colours
 
 Install [Node.js](https://nodejs.org/en/download) and run `npm ci` from the project folder. Kawarp 1.4.0 turns artwork into the three swatches used by the original effects.
