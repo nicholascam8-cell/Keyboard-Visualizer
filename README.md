@@ -85,7 +85,7 @@ The app runs on Windows, macOS, and desktop Linux. On another device, play audio
 
 ## Start with one click on macOS
 
-After completing the dependency and audio setup, double-click `start-visualizer.command` in Finder. It opens Spotify, starts OpenRGB's local SDK server if needed, and runs the project's virtual-environment Python with your saved settings. If OpenRGB is already open with its server disabled, start the server on port 6742 from its SDK Server tab. Keep the BlackHole Multi-Output Device selected as your macOS output. Stop an existing visualizer before launching another session. Press Control-C in the launcher Terminal tab to stop.
+After completing the dependency and audio setup, double-click `start-visualizer.command` in Finder. It stops existing music-lighting launchers and spotify_rgb.py sessions for your user, closes Spotify and OpenRGB, then starts Spotify, OpenRGB's local SDK server, and the project's virtual-environment Python with your saved settings. Processes get up to five seconds to exit before forced termination. If OpenRGB is already open with its server disabled, start the server on port 6742 from its SDK Server tab. Keep the BlackHole Multi-Output Device selected as your macOS output. Press Control-C in the launcher Terminal tab to stop.
 
 The launcher also runs `spicetify upgrade` when Spicetify is installed. A failed upgrade prints a message and continues.
 

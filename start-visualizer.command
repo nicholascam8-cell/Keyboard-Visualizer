@@ -11,6 +11,41 @@ if [ ! -x .venv/bin/python ]; then
     exit 1
 fi
 
+# Finish earlier launchers before stopping the applications they started.
+stop_matches() {
+    local pattern="$1"
+    local process_id
+    local targets=()
+    while IFS= read -r process_id; do
+        if [ "$process_id" != "$" ]; then
+            targets+=("$process_id")
+        fi
+    done < <(/usr/bin/pgrep -U "$(/usr/bin/id -u)" -f "$pattern" || true)
+    if [ "${#targets[@]}" -eq 0 ]; then
+        return
+    fi
+    /bin/kill -TERM "${targets[@]}" 2>/dev/null || true
+    for attempt in {1..5}; do
+        local running=0
+        for process_id in "${targets[@]}"; do
+            if /bin/kill -0 "$process_id" 2>/dev/null; then
+                running=1
+            fi
+        done
+        if [ "$running" -eq 0 ]; then
+            return
+        fi
+        /bin/sleep 1
+    done
+    /bin/kill -KILL "${targets[@]}" 2>/dev/null || true
+}
+
+printf '%s\n' "Stopping previous music-lighting sessions..."
+stop_matches '(^|[ /])start-(visualizer|keyboard-music)[.]command([[:space:]]|$)'
+stop_matches '(^|[ /])spotify_rgb[.]py([[:space:]]|$)'
+stop_matches '(^|[ /])OpenRGB([[:space:]]|$)'
+stop_matches '(^|[ /])Spotify([[:space:]]|$)'
+
 if command -v spicetify >/dev/null 2>&1; then
     spicetify upgrade || printf '%s\n' "Spicetify upgrade failed. Continuing with the visualizer."
 fi
